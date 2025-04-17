@@ -1,0 +1,134 @@
+---
+- name: Deploy Docker-based website & Monitor Metrics
+  hosts: all
+  become: yes
+  vars:
+    prometheus_url: "http://172.16.51.65:9090/api/v1/query"
+
+  tasks:
+    - name: Get Baseline CPU Usage (Before Any Deployment)
+      uri:
+        url: "{{ prometheus_url }}?query=100-(avg%20by(instance)(rate(node_cpu_seconds_total{mode%3D'idle'}[1m]))*100)"
+        return_content: yes
+      register: baseline_cpu
+
+    - name: Get Baseline Memory Usage
+      uri:
+        url: "{{ prometheus_url }}?query=(node_memory_Active_bytes%20/%20node_memory_MemTotal_bytes)*100"
+        return_content: yes
+      register: baseline_memory
+
+    - name: Get Baseline Disk I/O
+      uri:
+        url: "{{ prometheus_url }}?query=rate(node_disk_io_time_seconds_total[1m])"
+        return_content: yes
+      register: baseline_disk_io
+
+    - name: Get Baseline Network Usage (Improved)
+      uri:
+        url: "{{ prometheus_url }}?query=sum(rate(node_network_receive_bytes_total[1m])%2Brate(node_network_transmit_bytes_total[1m]))"
+        return_content: yes
+      register: baseline_network
+
+    - name: Install Required Packages
+      apt:
+        name:
+          - docker.io
+          - prometheus-node-exporter
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Ensure Docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Record Deployment Start Time
+      command: date +%s
+      register: start_time
+
+    - name: Start Cafe Web Container
+      docker_container:
+        name: web_ansible
+        image: vijeth2001/cafestatic:v1
+        ports:
+          - "2040:80"
+        state: started
+
+    - name: Wait for Web App to Start
+      wait_for:
+        host: localhost
+        port: 2040
+        state: started
+        timeout: 10
+        delay: 3
+      register: webapp_check
+
+    - name: Measure Service Response Time (Average of 5 requests)
+      shell: |
+        total=0
+        for i in {1..5}
+        do
+          curl -o /dev/null -s -w %{time_total}\\n http://localhost:2040
+        done | awk '{sum += $1} END {print sum/NR}'
+      register: response_time
+
+    - name: Record Deployment End Time
+      command: date +%s
+      register: end_time
+
+    - name: Calculate Total Deployment Time
+      set_fact:
+        deployment_time: "{{ end_time.stdout | int - start_time.stdout | int }}"
+
+    - name: Get Final CPU Usage
+      uri:
+        url: "{{ prometheus_url }}?query=100-(avg%20by(instance)(rate(node_cpu_seconds_total{mode%3D'idle'}[1m]))*100)"
+        return_content: yes
+      register: final_cpu
+
+    - name: Get Final Memory Usage
+      uri:
+        url: "{{ prometheus_url }}?query=(node_memory_Active_bytes%20/%20node_memory_MemTotal_bytes)*100"
+        return_content: yes
+      register: final_memory
+
+    - name: Get Final Disk I/O
+      uri:
+        url: "{{ prometheus_url }}?query=rate(node_disk_io_time_seconds_total[1m])"
+        return_content: yes
+      register: final_disk_io
+
+    - name: Get Final Network Usage (Improved)
+      uri:
+        url: "{{ prometheus_url }}?query=sum(rate(node_network_receive_bytes_total[1m])%2Brate(node_network_transmit_bytes_total[1m]))"
+        return_content: yes
+      register: final_network
+
+    - name: Calculate CPU Usage During Deployment
+      set_fact:
+        cpu_usage: "{{ (final_cpu.json.data.result[0].value[1]|float - baseline_cpu.json.data.result[0].value[1]|float) | abs }}"
+
+    - name: Calculate Memory Usage During Deployment
+      set_fact:
+        memory_usage: "{{ (final_memory.json.data.result[0].value[1]|float - baseline_memory.json.data.result[0].value[1]|float) | abs }}"
+
+    - name: Calculate Disk I/O During Deployment
+      set_fact:
+        disk_io: "{{ (final_disk_io.json.data.result[0].value[1]|float - baseline_disk_io.json.data.result[0].value[1]|float) | abs }}"
+
+    - name: Calculate Network Usage During Deployment
+      set_fact:
+        network_usage: "{{ (final_network.json.data.result[0].value[1]|float - baseline_network.json.data.result[0].value[1]|float) | abs }}"
+
+    - name: Display Deployment Metrics
+      debug:
+        msg:
+          - "Total Deployment Time: {{ deployment_time }} seconds"
+          - "CPU Usage (During Deployment): {{ cpu_usage }}%"
+          - "Memory Usage (During Deployment): {{ memory_usage }}%"
+          - "Disk I/O (During Deployment): {{ disk_io }} MB/s"
+          - "Network Usage (During Deployment): {{ network_usage }} bytes/sec"
+          - "Service Response Time (Average): {{ response_time.stdout }} seconds"
